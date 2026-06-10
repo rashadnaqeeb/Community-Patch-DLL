@@ -14,7 +14,7 @@ class Config(Enum):
     Debug = 1
 
 CORE_DLL = 'CvGameCore_Expansion2'
-PROJECT_DIR = Path().resolve()
+PROJECT_DIR = Path(__file__).resolve().parent
 SDK_VERSION = '7.0'  # Change this to the appropriate SDK version if different, e.g. 7.0A
 INCLUDE_PATHS = [
     rf'C:\Program Files (x86)\Microsoft SDKs\Windows\v{SDK_VERSION}\Include',
@@ -375,7 +375,7 @@ def build_clang_cpp(cl: str, cl_args: str, build_dir: Path, log: typing.IO):
 def update_commit_id(log: typing.IO):
     print('updating commit id...')
     start_time = time.time()
-    cp = subprocess.run('update_commit_id.bat', capture_output=True)
+    cp = subprocess.run(os.path.join(PROJECT_DIR, 'update_commit_id.bat'), capture_output=True, shell=True, cwd=str(PROJECT_DIR))
     log.write(str.encode(f'==== update_commit_id.bat ====\n'))
     log.write(cp.stdout)
     log.write(cp.stderr)
