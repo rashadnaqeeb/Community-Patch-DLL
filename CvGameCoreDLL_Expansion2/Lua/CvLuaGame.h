@@ -40,6 +40,10 @@ protected:
 	static int lCycleCities(lua_State* L);
 	static int lCycleUnits(lua_State* L);
 	static int lCyclePlotUnits(lua_State* L);
+	// CIVVACCESS: fork-added bindings (vanilla-fork names).
+	static int lGetCycleUnits(lua_State* L);
+	static int lGetBuildRoutePath(lua_State* L);
+	static int lGetClosestSearchedPlot(lua_State* L);
 
 	static int lSelectionListMove(lua_State* L);
 	static int lSelectionListGameNetMessage(lua_State* L);

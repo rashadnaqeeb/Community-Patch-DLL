@@ -90,6 +90,11 @@ protected:
 	static int lGetResolutionName(lua_State* L);
 	static int lGetResolutionDetails(lua_State* L);
 	static int lGetMemberDetails(lua_State* L);
+	// CIVVACCESS: per-section accessors over the same data GetMemberDetails
+	// concatenates (vanilla-fork names).
+	static int lGetMemberDelegationDetails(lua_State* L);
+	static int lGetMemberKnowledgeDetails(lua_State* L);
+	static int lGetMemberVoteOpinionDetails(lua_State* L);
 	static int lGetProjectDetails(lua_State* L);
 	static int lGetProjectRewardTierDetails(lua_State* L);
 	static int lGetCurrentEffectsSummary(lua_State* L);

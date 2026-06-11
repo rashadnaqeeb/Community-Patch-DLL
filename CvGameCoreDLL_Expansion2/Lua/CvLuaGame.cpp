@@ -29,6 +29,11 @@
 #include "../CvGameTextMgr.h"
 #include "../CvReplayMessage.h"
 #include "../cvStopWatch.h"
+// CIVVACCESS: Game.GetCycleUnits / Game.GetBuildRoutePath /
+// Game.GetClosestSearchedPlot bindings.
+#include "../CvUnitCycler.h"
+#include "../CvAStar.h"
+#include "../CvBuilderTaskingAI.h"
 
 #pragma warning(disable:4800 ) //forcing value to bool 'true' or 'false'
 
@@ -58,6 +63,11 @@ void CvLuaGame::RegisterMembers(lua_State* L)
 	Method(CycleCities);
 	Method(CycleUnits);
 	Method(CyclePlotUnits);
+	// CIVVACCESS: fork-added bindings under their vanilla-fork names. These
+	// three double as the Civ-V-Access forkPresent() capability canary.
+	Method(GetCycleUnits);
+	Method(GetBuildRoutePath);
+	Method(GetClosestSearchedPlot);
 
 	Method(SelectionListMove);
 	Method(SelectionListGameNetMessage);
@@ -578,6 +588,177 @@ int CvLuaGame::lCyclePlotUnits(lua_State* L)
 	const bool bResult = GetInstance()->cyclePlotUnits(pkPlot, bForward, bAuto, iCount);
 	lua_pushboolean(L, bResult);
 	return 1;
+}
+//------------------------------------------------------------------------------
+// CIVVACCESS: Returns the active player's CvUnitCycler order as a 1-indexed
+// Lua array of unit IDs. Same data structure the engine's Game.CycleUnits
+// walks; exposing it Lua-side lets the Civ-V-Access unit walk match the
+// engine's own cycle order exactly.
+int CvLuaGame::lGetCycleUnits(lua_State* L)
+{
+	const PlayerTypes ePlayer = GetInstance()->getActivePlayer();
+	lua_createtable(L, 0, 0);
+	if(ePlayer < 0 || ePlayer >= MAX_PLAYERS)
+	{
+		return 1;
+	}
+	CvUnitCycler& kCycler = GET_PLAYER(ePlayer).GetUnitCycler();
+	const CvUnitCycler::Node* pNode = kCycler.HeadNode();
+	int i = 0;
+	while(pNode != NULL)
+	{
+		lua_pushinteger(L, pNode->m_data);
+		lua_rawseti(L, -2, ++i);
+		pNode = kCycler.NextNode(pNode);
+	}
+	return 1;
+}
+//------------------------------------------------------------------------------
+// CIVVACCESS: Route-to mission preview -- the same path the engine will
+// follow at execution time. Mirrors CvUnit::UnitRoadTo's pathfinder setup
+// (player's best route with the MOD_GLOBAL_QUICK_ROUTES road downgrade,
+// PT_BUILD_ROUTE, PURPOSE_MANUAL) so the preview and the executed mission
+// cannot diverge.
+// Args: (iStartX, iStartY, iEndX, iEndY, iPlayer, [iRoute = NO_ROUTE]).
+// iRoute = NO_ROUTE means "whatever UnitRoadTo would pick".
+// Returns a 1-indexed Lua array ordered start-to-destination (the start
+// plot is entry [1]), each entry { x, y }. Empty array if no path exists.
+// Caller sums build turns via Plot:GetBuildTurnsLeft.
+int CvLuaGame::lGetBuildRoutePath(lua_State* L)
+{
+	const int iStartX = luaL_checkint(L, 1);
+	const int iStartY = luaL_checkint(L, 2);
+	const int iEndX   = luaL_checkint(L, 3);
+	const int iEndY   = luaL_checkint(L, 4);
+	const int iPlayer = luaL_checkint(L, 5);
+	const int iRoute  = luaL_optint(L, 6, NO_ROUTE);
+
+	lua_createtable(L, 0, 0);
+	if(iPlayer < 0 || iPlayer >= MAX_PLAYERS)
+	{
+		return 1;
+	}
+	CvPlayer& kPlayer = GET_PLAYER((PlayerTypes)iPlayer);
+	CvPlot* pFromPlot = GC.getMap().plot(iStartX, iStartY);
+	CvPlot* pToPlot = GC.getMap().plot(iEndX, iEndY);
+	if(pFromPlot == NULL || pToPlot == NULL)
+	{
+		return 1;
+	}
+
+	RouteTypes eRoute = (RouteTypes)iRoute;
+	if(eRoute == NO_ROUTE)
+	{
+		eRoute = kPlayer.getBestRoute();
+		// Mirror UnitRoadTo: a human's railroad order falls back to road
+		// until a road connection exists between the endpoints.
+		if(MOD_GLOBAL_QUICK_ROUTES && kPlayer.isHuman(ISHUMAN_AI_UNITS) && eRoute > ROUTE_ROAD)
+		{
+			if(!IsPlotConnectedToPlot((PlayerTypes)iPlayer, pFromPlot, pToPlot, ROUTE_ROAD, false, false))
+				eRoute = ROUTE_ROAD;
+		}
+	}
+	if(eRoute == NO_ROUTE)
+	{
+		return 1;
+	}
+	const BuildTypes eBuild = kPlayer.GetBuilderTaskingAI()->GetBuildRoute(eRoute);
+
+	SPathFinderUserData data((PlayerTypes)iPlayer, PT_BUILD_ROUTE, eBuild, eRoute, PURPOSE_MANUAL, false);
+	SPath path = GC.GetStepFinder().GetPath(iStartX, iStartY, iEndX, iEndY, data);
+
+	for(int i = 0; i < path.length(); ++i)
+	{
+		const SPathNode& kNode = path.vPlots[i];
+		lua_createtable(L, 0, 2);
+		lua_pushinteger(L, kNode.x); lua_setfield(L, -2, "x");
+		lua_pushinteger(L, kNode.y); lua_setfield(L, -2, "y");
+		lua_rawseti(L, -2, i + 1);
+	}
+	return 1;
+}
+//------------------------------------------------------------------------------
+// CIVVACCESS: After a failed path preview, the closest plot the unit can
+// actually reach in the direction of the original target -- the "got as
+// far as X" answer for unreachable destinations. The vanilla Civ-V-Access
+// fork walks the pathfinder's closed list; VP's pathfinder doesn't expose
+// one, so this wraps GetPlotsInReach (the unit's whole reachable region)
+// and picks the plot at minimum hex distance from the target, tie-broken
+// by path cost so an equally-close-but-cheaper tile wins.
+//
+// Args: (iTargetX, iTargetY, iPlayer, iUnitID). The caller (the VP
+// EngineData seam) passes the unit of its last generatePath; the vanilla
+// binding reads the same unit out of the pathfinder state instead, so the
+// extra args keep the binding name and return shape identical across
+// forks. The reach query uses MOVEFLAG_IGNORE_STACKING_SELF to match the
+// relaxation VP's own Unit:GeneratePath hardcodes for previews.
+// Returns: (x, y, distance), or no return values when the unit cannot be
+// resolved. The unit's own plot is part of its reachable region, so a
+// fully-blocked unit answers with its own position, matching the vanilla
+// fork's empty-closed-list fallback.
+int CvLuaGame::lGetClosestSearchedPlot(lua_State* L)
+{
+	const int iTargetX = luaL_checkint(L, 1);
+	const int iTargetY = luaL_checkint(L, 2);
+	const int iPlayer = luaL_checkint(L, 3);
+	const int iUnitID = luaL_checkint(L, 4);
+
+	if(iPlayer < 0 || iPlayer >= MAX_PLAYERS)
+	{
+		return 0;
+	}
+	CvUnit* pUnit = GET_PLAYER((PlayerTypes)iPlayer).getUnit(iUnitID);
+	if(pUnit == NULL || pUnit->plot() == NULL)
+	{
+		return 0;
+	}
+
+	SPathFinderUserData data(pUnit, CvUnit::MOVEFLAG_IGNORE_STACKING_SELF, INT_MAX);
+	ReachablePlots plots = GC.GetPathFinder().GetPlotsInReach(pUnit->plot(), data);
+
+	CvMap& kMap = GC.getMap();
+	int iBestX = -1;
+	int iBestY = -1;
+	int iBestDist = INT_MAX;
+	int iBestCost = INT_MAX;
+	for(ReachablePlots::const_iterator it = plots.begin(); it != plots.end(); ++it)
+	{
+		CvPlot* pPlot = kMap.plotByIndex(it->iPlotIndex);
+		if(pPlot == NULL)
+		{
+			continue;
+		}
+		// Skip the target tile itself. Returning the target as "closest
+		// reachable" is meaningless -- it's exactly where the user is
+		// pointing, and this binding only runs after a path to it failed.
+		if(pPlot->getX() == iTargetX && pPlot->getY() == iTargetY)
+		{
+			continue;
+		}
+		const int iDist = plotDistance(pPlot->getX(), pPlot->getY(), iTargetX, iTargetY);
+		const int iCost = it->iNormalizedDistanceRaw;
+		if(iDist < iBestDist || (iDist == iBestDist && iCost < iBestCost))
+		{
+			iBestDist = iDist;
+			iBestCost = iCost;
+			iBestX = pPlot->getX();
+			iBestY = pPlot->getY();
+		}
+	}
+
+	if(iBestX == -1)
+	{
+		// Reach region empty (or only the target tile). The unit's own
+		// position is the only meaningful "reached" tile.
+		iBestX = pUnit->getX();
+		iBestY = pUnit->getY();
+		iBestDist = plotDistance(iBestX, iBestY, iTargetX, iTargetY);
+	}
+
+	lua_pushinteger(L, iBestX);
+	lua_pushinteger(L, iBestY);
+	lua_pushinteger(L, iBestDist);
+	return 3;
 }
 //------------------------------------------------------------------------------
 // void selectionListMove(CyPlot* pPlot, bool bAlt, bool bShift, bool bCtrl);
