@@ -345,7 +345,10 @@ public:
 	bool CanCreateTradeRoute(PlayerTypes eOtherPlayer, DomainTypes eDomain);
 	bool CanCreateTradeRoute(DomainTypes eDomain) const;
 
-	bool CreateTradeRoute(CvCity* pOriginCity, CvCity* pDestCity, DomainTypes eDomain, TradeConnectionType eConnectionType) const;
+	// CIVVACCESS: strCarriedName carries the establishing unit's player-set
+	// name onto the spawned trade unit so nicknames survive starting a route.
+	// Empty means no rename, the engine's default behavior.
+	bool CreateTradeRoute(CvCity* pOriginCity, CvCity* pDestCity, DomainTypes eDomain, TradeConnectionType eConnectionType, const CvString& strCarriedName = "") const;
 
 	const TradeConnection* GetTradeConnection(CvCity* pOriginCity, CvCity* pDestCity) const;
 	int GetNumberOfCityStateTradeRoutes();

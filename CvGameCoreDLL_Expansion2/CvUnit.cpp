@@ -9155,7 +9155,10 @@ bool CvUnit::makeTradeRoute(int iX, int iY, TradeConnectionType eConnectionType)
 		pToCity = pToPlot->getPlotCity();
 	}
 
-	bool bResult = GET_PLAYER(getOwner()).GetTrade()->CreateTradeRoute(pFromCity, pToCity, getDomainType(), eConnectionType);
+	// CIVVACCESS: the engine spawns a fresh trade unit to run the route and
+	// kills this one below, so pass any player-set name along for the new
+	// unit to inherit.
+	bool bResult = GET_PLAYER(getOwner()).GetTrade()->CreateTradeRoute(pFromCity, pToCity, getDomainType(), eConnectionType, getNameNoDesc());
 
 	if (bResult)
 		kill(true);
