@@ -337,7 +337,14 @@ def build_cl_config_args(config: Config) -> list[str]:
     for include_dir in INCLUDE_DIRS:
         args.append(f'/I"{os.path.join(PROJECT_DIR, include_dir)}"')
     for include_path in INCLUDE_PATHS:
-        args.append(f'-external:I"{include_path}"')
+        # CIVVACCESS: /imsvc, not -external:I. -external:I ranks these dirs above clang's
+        # builtin resource headers, so VC9's stdarg.h shadows clang's and va_start compiles
+        # to MSVC's raw pointer arithmetic instead of @llvm.va_start. Without the intrinsic,
+        # modern LLVM treats every va_start function as never reading its varargs and
+        # deletes them (inlining and dead-arg elimination both fire); the DLL then dies in
+        # DllMain's first CUSTOMLOG (LoadLibrary error 1114). /imsvc keeps the same
+        # system-header warning suppression but is searched after clang's own headers.
+        args.append(f'/imsvc"{include_path}"')
     for suppress in CL_SUPPRESS:
         args.append(f'-Wno-{suppress}')
     return args
