@@ -50,6 +50,10 @@ void CvLuaUnit::PushMethods(lua_State* L, int t)
 	Method(GetActivePath);
 	Method(GetWaypointPath);
 	Method(GeneratePathToNextWaypoint);
+	// CIVVACCESS: fork-added bindings under their vanilla-fork names, so the
+	// Civ-V-Access EngineData seam keeps one Lua surface across engine forks.
+	Method(GetMissionQueue);
+	Method(GetBestBuildRoute);
 	Method(GetMeleeAttackFromPlot);
 	Method(GetPotentialRangeAttackTargetPlots);
 	Method(GetPotentialRangeAttackOriginPlots);
@@ -942,6 +946,51 @@ int CvLuaUnit::lGeneratePathToNextWaypoint(lua_State* L)
 
 	return 1;
 }
+//------------------------------------------------------------------------------
+// CIVVACCESS: Returns the unit's pending mission queue as a 1-indexed
+// Lua array. Each entry is { mission, data1, data2, flags, pushTurn }
+// where mission is the MissionTypes enum value. Empty array if the queue
+// is empty. Same payload shape as the vanilla Civ-V-Access fork.
+int CvLuaUnit::lGetMissionQueue(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+	const int iCount = pkUnit->GetLengthMissionQueue();
+
+	lua_createtable(L, iCount, 0);
+	for(int i = 0; i < iCount; ++i)
+	{
+		const MissionData* pkData = pkUnit->GetMissionData(i);
+		if(pkData == NULL)
+		{
+			continue;
+		}
+		lua_createtable(L, 0, 5);
+		lua_pushinteger(L, pkData->eMissionType); lua_setfield(L, -2, "mission");
+		lua_pushinteger(L, pkData->iData1);       lua_setfield(L, -2, "data1");
+		lua_pushinteger(L, pkData->iData2);       lua_setfield(L, -2, "data2");
+		lua_pushinteger(L, pkData->iFlags);       lua_setfield(L, -2, "flags");
+		lua_pushinteger(L, pkData->iPushTurn);    lua_setfield(L, -2, "pushTurn");
+		lua_rawseti(L, -2, i + 1);
+	}
+	return 1;
+}
+//------------------------------------------------------------------------------
+// CIVVACCESS: Wraps CvUnit::GetBestBuildRouteForRoadTo (VP's rename of the
+// vanilla GetBestBuildRoute). Returns (routeId, buildId) for the best route
+// the unit's owner has tech for that can be built on the given plot.
+// NO_ROUTE / NO_BUILD when the unit can't build any route there. Registered
+// under the vanilla-fork name GetBestBuildRoute so the Civ-V-Access
+// EngineData seam body is identical on both engine forks.
+int CvLuaUnit::lGetBestBuildRoute(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+	CvPlot* pkPlot = CvLuaPlot::GetInstance(L, 2);
+	BuildTypes eBestBuild = NO_BUILD;
+	const RouteTypes eBestRoute = pkUnit->GetBestBuildRouteForRoadTo(pkPlot, &eBestBuild);
+	lua_pushinteger(L, eBestRoute);
+	lua_pushinteger(L, eBestBuild);
+	return 2;
+}
 
 //-------------- returns the plots the unit can bombard from a given plot. does not check for presence of enemies!
 // GetPotentialRangeAttackTargetPlots(plot)
@@ -1122,15 +1171,33 @@ int CvLuaUnit::lGetDeclareWarRangeStrike(lua_State* L)
 	return 1;
 }
 //------------------------------------------------------------------------------
-//bool canMoveOrAttackInto(CyPlot* pPlot, bool bDeclareWar = false, bDestination = false);
+//bool canMoveOrAttackInto(CyPlot* pPlot, bool bDeclareWar = false, bDestination = false, bPretendCorrectEmbarkState = false);
 int CvLuaUnit::lCanMoveOrAttackInto(lua_State* L)
 {
 	CvUnit* pkUnit = GetInstance(L);
 	CvPlot* pkPlot = CvLuaPlot::GetInstance(L, 2);
-	//const bool bDeclareWar = luaL_optint(L, 3, 0);
+	// CIVVACCESS: re-enable the declare-war argument VP commented out. VP's
+	// engine has no MOVEFLAG_DECLARE_WAR; the post-declaration entry
+	// relaxation it stood for is territory access, which VP models as
+	// MOVEFLAG_IGNORE_RIGHT_OF_PASSAGE ("pretend we can enter everybody's
+	// territory" -- exactly the state a war declaration buys). The attack
+	// half needs no pretend-war handling for the Civ-V-Access caller: its
+	// defender search is at-war-gated, so by the time this gate runs the
+	// target is already an enemy and canMoveInto's enemy tests answer
+	// directly.
+	const bool bDeclareWar = luaL_optint(L, 3, 0);
 	const bool bDestination = luaL_optint(L, 4, 0);
+	// CIVVACCESS: accepted for call-shape parity with the vanilla fork's
+	// binding and deliberately unmapped: VP has no
+	// MOVEFLAG_PRETEND_CORRECT_EMBARK_STATE, and no Civ-V-Access caller
+	// passes this argument on either engine.
+	luaL_optint(L, 5, 0);
 
 	int iMoveFlags = 0;
+	if(bDeclareWar)
+	{
+		iMoveFlags |= CvUnit::MOVEFLAG_IGNORE_RIGHT_OF_PASSAGE;
+	}
 	if(bDestination)
 	{
 		iMoveFlags |= CvUnit::MOVEFLAG_DESTINATION;

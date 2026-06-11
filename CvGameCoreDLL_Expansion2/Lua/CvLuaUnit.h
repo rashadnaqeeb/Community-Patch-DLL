@@ -43,6 +43,9 @@ protected:
 	static int lGetActivePath(lua_State* L);
 	static int lGeneratePathToNextWaypoint(lua_State* L);
 	static int lGetWaypointPath(lua_State* L);
+	// CIVVACCESS: fork-added bindings (vanilla-fork names).
+	static int lGetMissionQueue(lua_State* L);
+	static int lGetBestBuildRoute(lua_State* L);
 	static int lGetMeleeAttackFromPlot(lua_State* L);
 	static int lGetPotentialRangeAttackTargetPlots(lua_State* L);
 	static int lGetPotentialRangeAttackOriginPlots(lua_State* L);
