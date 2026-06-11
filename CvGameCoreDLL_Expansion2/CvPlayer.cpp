@@ -13257,26 +13257,72 @@ void CvPlayer::receiveGoody(CvPlot* pPlot, GoodyTypes eGoody, CvUnit* pUnit)
 
 		bool bDontShowRewardPopup = GC.GetEngineUserInterface()->IsOptionNoRewardPopups();
 
+		// CIVVACCESS: hoisted out of the popup branch so the hook below can
+		// reuse it. Vanilla derives the same value inside the popup guard;
+		// keeping the derivation here ties the popup's data field and the
+		// CivVAccess hook's payload to a single source of truth.
+		int iSpecialValue = 0;
+
+		if (iGold > 0)
+			iSpecialValue = iGold;
+		else if (iCulture > 0)
+			iSpecialValue = iCulture;
+		else if (iFaith > 0)
+			iSpecialValue = iFaith;
+		else if (iProduction > 0)
+			iSpecialValue = iProduction;
+		else if (iScience > 0)
+			iSpecialValue = iScience;
+
 		// Don't show in MP, or if the player has turned it off
 		if(!GC.getGame().isReallyNetworkMultiPlayer() && !bDontShowRewardPopup)
 		{
-			int iSpecialValue = 0;
-
-			if (iGold > 0)
-				iSpecialValue = iGold;
-			else if (iCulture > 0)
-				iSpecialValue = iCulture;
-			else if (iFaith > 0)
-				iSpecialValue = iFaith;
-			else if (iProduction > 0)
-				iSpecialValue = iProduction;
-			else if (iScience > 0)
-				iSpecialValue = iScience;
-
 			CvPopupInfo kPopupInfo(BUTTONPOPUP_GOODY_HUT_REWARD, eGoody, iSpecialValue);
 			GC.GetEngineUserInterface()->AddPopup(kPopupInfo);
 			// We are adding a popup that the player must make a choice in, make sure they are not in the end-turn phase.
 			CancelActivePlayerEndTurn();
+		}
+
+		// CIVVACCESS: Fire a goody-hut-received hook so the accessibility mod
+		// can announce the reward. The engine emits BUTTONPOPUP_GOODY_HUT
+		// _REWARD only outside network MP (the guard above); this hook fires
+		// unconditionally for the active player so the Lua side has a signal
+		// in MP, where popups are suppressed. The MP-only consumer lives in
+		// CivVAccess_MultiplayerRewards.lua and gates on
+		// Game:IsNetworkMultiPlayer() so single-player still rides the popup
+		// path. iSpecialValue mirrors the popup's data field: gold, culture,
+		// faith, production, or science depending on which the goody carries.
+		ICvEngineScriptSystem1* pkScriptSystem = gDLL->GetScriptSystem();
+		if(pkScriptSystem)
+		{
+			CvLuaArgsHandle args;
+			args->Push(GetID());
+			args->Push((int)eGoody);
+			args->Push(iSpecialValue);
+			bool bResult = false;
+			LuaSupport::CallHook(pkScriptSystem, "CivVAccessGoodyHutReceived", args.get(), bResult);
+		}
+	}
+	else
+	{
+		// CIVVACCESS: foreign-cleared sibling. The active-player block above
+		// covers the player's own goody hut pickups. When some other civ
+		// pops a hut, a sighted player would notice if the plot is in their
+		// line of sight; an unsighted player would not. Fire an unconditional
+		// hook with (actor, plot coords) so the Lua side can decide
+		// (visibility filter, teammate filter). Reward type and amount are
+		// deliberately omitted -- those are private to the actor and a
+		// sighted player wouldn't see them either. Consumed by
+		// CivVAccess_ForeignClearWatch.lua.
+		ICvEngineScriptSystem1* pkScriptSystem = gDLL->GetScriptSystem();
+		if(pkScriptSystem)
+		{
+			CvLuaArgsHandle args;
+			args->Push(GetID());
+			args->Push(pPlot->getX());
+			args->Push(pPlot->getY());
+			bool bResult = false;
+			LuaSupport::CallHook(pkScriptSystem, "CivVAccessForeignGoodyCleared", args.get(), bResult);
 		}
 	}
 }

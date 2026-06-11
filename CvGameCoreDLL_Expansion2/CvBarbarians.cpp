@@ -324,19 +324,48 @@ void CvBarbarians::DoBarbCampCleared(CvPlot* pPlot, PlayerTypes ePlayer, CvUnit*
 			GET_PLAYER(ePlayer).doInstantYield(INSTANT_YIELD_TYPE_BARBARIAN_CAMP_CLEARED, false, NO_GREATPERSON, NO_BUILDING, 0, true, NO_PLAYER, NULL, false, pBestCity);
 			GET_PLAYER(ePlayer).doInstantYield(INSTANT_YIELD_TYPE_BARBARIAN_CAMP_CLEARED, false, NO_GREATPERSON, NO_BUILDING, 0, false, NO_PLAYER, NULL, false, pBestCity);
 
+			// CIVVACCESS: hoisted out of the popup branch so the hook below
+			// can carry the same display-adjusted gold the popup shows.
+			// Keeping one derivation ties the popup's data field and the
+			// CivVAccess hook's payload to a single source of truth.
+			int iDisplayGold = iNumGold;
+			iDisplayGold *= 100 + GET_PLAYER(ePlayer).GetPlayerTraits()->GetPlunderModifier();
+			iDisplayGold /= 100;
+			if (MOD_BALANCE_VP)
+			{
+				int iEra = max<int>(1, GET_PLAYER(ePlayer).GetCurrentEra());
+				iDisplayGold *= iEra;
+			}
+
+			// CIVVACCESS: barbarian-camp-cleared hook for the accessibility
+			// mod's MP fallback. The engine shows BUTTONPOPUP_BARBARIAN_CAMP
+			// _REWARD only outside network MP (the gate below); this hook
+			// fires for the active player regardless so the Lua side has a
+			// signal in MP. Consumed by CivVAccess_MultiplayerRewards.lua,
+			// which gates on Game:IsNetworkMultiPlayer() so SP keeps riding
+			// the popup path. Firing from here (instead of the vanilla
+			// fork's CvUnit::setXY site) covers every clear path -- unit
+			// entry, border absorption, belief conversion -- with the exact
+			// gold the popup would display.
+			if (ePlayer == GC.getGame().getActivePlayer())
+			{
+				ICvEngineScriptSystem1* pkScriptSystem = gDLL->GetScriptSystem();
+				if (pkScriptSystem)
+				{
+					CvLuaArgsHandle args;
+					args->Push(ePlayer);
+					args->Push(pPlot->getX());
+					args->Push(pPlot->getY());
+					args->Push(iDisplayGold);
+					bool bResult = false;
+					LuaSupport::CallHook(pkScriptSystem, "CivVAccessBarbarianCampCleared", args.get(), bResult);
+				}
+			}
+
 			// If it's the active player then show the popup (but not in MP)
 			if (ePlayer == GC.getGame().getActivePlayer() && !GC.getGame().isReallyNetworkMultiPlayer())
 			{
-				// Make sure we show the correct amount of Gold in the popup
-				iNumGold *= 100 + GET_PLAYER(ePlayer).GetPlayerTraits()->GetPlunderModifier();
-				iNumGold /= 100;
-				if (MOD_BALANCE_VP)
-				{
-					int iEra = max<int>(1, GET_PLAYER(ePlayer).GetCurrentEra());
-					iNumGold *= iEra;
-				}
-
-				CvPopupInfo kPopupInfo(BUTTONPOPUP_BARBARIAN_CAMP_REWARD, iNumGold);
+				CvPopupInfo kPopupInfo(BUTTONPOPUP_BARBARIAN_CAMP_REWARD, iDisplayGold);
 				DLLUI->AddPopup(kPopupInfo);
 				// We are adding a popup that the player must make a choice in, make sure they are not in the end-turn phase.
 				CancelActivePlayerEndTurn();
@@ -362,6 +391,31 @@ void CvBarbarians::DoBarbCampCleared(CvPlot* pPlot, PlayerTypes ePlayer, CvUnit*
 					CvMinorCivAI* pMinorCivAI = minorPlayer.GetMinorCivAI();
 					pMinorCivAI->DoTestActiveQuestsForPlayer(ePlayer, /*bTestComplete*/ true, /*bTestObsolete*/ false, MINOR_CIV_QUEST_KILL_CAMP);
 				}
+			}
+		}
+
+		// CIVVACCESS: foreign-cleared sibling. The block above only rewards
+		// (and only signals) the clearing player. When some other civ clears
+		// a camp, a sighted player would notice if the plot is in their line
+		// of sight; an unsighted player would not. Fire an unconditional
+		// hook with (actor, plot coords) so the Lua side can decide
+		// (visibility filter, teammate filter). Reward amounts are
+		// deliberately omitted -- those are private to the actor and a
+		// sighted player wouldn't see them either. Consumed by
+		// CivVAccess_ForeignClearWatch.lua. Unlike VP's own
+		// GAMEEVENT_BarbariansCampCleared below, this does not depend on
+		// the MOD_EVENTS_BARBARIANS database flag.
+		if (ePlayer != GC.getGame().getActivePlayer())
+		{
+			ICvEngineScriptSystem1* pkScriptSystem = gDLL->GetScriptSystem();
+			if (pkScriptSystem)
+			{
+				CvLuaArgsHandle args;
+				args->Push(ePlayer);
+				args->Push(pPlot->getX());
+				args->Push(pPlot->getY());
+				bool bResult = false;
+				LuaSupport::CallHook(pkScriptSystem, "CivVAccessForeignBarbCampCleared", args.get(), bResult);
 			}
 		}
 	}

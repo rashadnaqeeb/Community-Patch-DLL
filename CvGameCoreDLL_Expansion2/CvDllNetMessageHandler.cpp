@@ -862,6 +862,30 @@ void CvDllNetMessageHandler::ResponsePushMission(PlayerTypes ePlayer, int iUnitI
 	}
 
 	CvUnit::dispatchingNetMessage(false);
+
+	// CIVVACCESS: Fire MissionDispatched hook for the accessibility mod. The
+	// engine routes every human-issued unit mission through this Response*
+	// path -- in SP it dispatches near-immediately, in MP it lands after the
+	// network lockstep slice processes the message. Either way, by the time
+	// pkUnit->PushMission returns the mission has executed (move resolved,
+	// queued for next turn, or refused), so this is the deterministic post-
+	// resolution boundary the Lua side waits on. Fires even when pkUnit is
+	// NULL (engine refused the message, e.g. the unit was destroyed between
+	// send and dispatch); the listener uses the original iUnitID to match
+	// against its in-flight pending and announces "action failed" without
+	// the wall-clock guess a frame-count timeout would force.
+	ICvEngineScriptSystem1* pkScriptSystem = gDLL->GetScriptSystem();
+	if(pkScriptSystem)
+	{
+		CvLuaArgsHandle args;
+		args->Push(ePlayer);
+		args->Push(iUnitID);
+		args->Push(eMission);
+		args->Push(iData1);
+		args->Push(iData2);
+		bool bResult = false;
+		LuaSupport::CallHook(pkScriptSystem, "CivVAccessMissionDispatched", args.get(), bResult);
+	}
 }
 //------------------------------------------------------------------------------
 void CvDllNetMessageHandler::ResponseGreatPersonChoice(PlayerTypes ePlayer, UnitTypes eGreatPersonUnit)
@@ -1156,6 +1180,37 @@ void CvDllNetMessageHandler::ResponseSwapUnits(PlayerTypes ePlayer, int iUnitID,
 		}
 	}
 	CvUnit::dispatchingNetMessage(false);
+
+	// CIVVACCESS: Fire MissionDispatched for the originating unit. Game
+	// .SelectionListMove routes to GAMEMESSAGE_SWAP_UNITS when the target
+	// plot has a same-type friendly unit, so non-combat moves can land here
+	// instead of ResponsePushMission. The hook fires once for the
+	// originating unit (the one our pending tracker registered against);
+	// the swapped-out unit is engine-side bookkeeping the mod doesn't
+	// follow. Mission type is reported as MOVE_TO since that's what
+	// SwapUnits ultimately pushes to the originating unit.
+	//
+	// Fires unconditionally even when the inner loop finds no same-type
+	// match (friendly unit moved away or died between the user's commit
+	// and the network round-trip). In that case the engine silently no-ops
+	// and the originating unit stays on its start hex with an empty mission
+	// queue, so the Lua listener speaks "action failed" -- which is the
+	// correct user-facing signal that the commit had no effect. Gating
+	// the hook on the swap actually executing would re-introduce the
+	// silent-failure mode this hook was added to eliminate (no resolver
+	// path runs, _pending leaks, the user hears nothing).
+	ICvEngineScriptSystem1* pkScriptSystem = gDLL->GetScriptSystem();
+	if(pkScriptSystem)
+	{
+		CvLuaArgsHandle args;
+		args->Push(ePlayer);
+		args->Push(iUnitID);
+		args->Push(CvTypes::getMISSION_MOVE_TO());
+		args->Push(iData1);
+		args->Push(iData2);
+		bool bResult = false;
+		LuaSupport::CallHook(pkScriptSystem, "CivVAccessMissionDispatched", args.get(), bResult);
+	}
 }
 //------------------------------------------------------------------------------
 void CvDllNetMessageHandler::ResponseUpdateCityCitizens(PlayerTypes ePlayer, int iCityID)
