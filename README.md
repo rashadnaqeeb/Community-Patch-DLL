@@ -1,5 +1,7 @@
 # Community-Patch-DLL
 
+> **Modified fork.** This is a fork of the [upstream Community Patch DLL](https://github.com/LoneGazebo/Community-Patch-DLL), modified to support the Civ V Access accessibility project for blind players. See [NOTICE.md](NOTICE.md) for the list of changes. Distributed under GPLv3, the same license as upstream.
+
 This is the repository for the Civ V SDK + Vox Populi Mod. 
 
 ## What is Vox Populi
