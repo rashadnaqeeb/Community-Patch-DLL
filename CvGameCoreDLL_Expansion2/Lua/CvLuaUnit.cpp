@@ -52,6 +52,7 @@ void CvLuaUnit::PushMethods(lua_State* L, int t)
 	Method(GeneratePathToNextWaypoint);
 	// CIVVACCESS: fork-added bindings under their vanilla-fork names, so the
 	// Civ-V-Access EngineData seam keeps one Lua surface across engine forks.
+	Method(GeneratePathWithFlags);
 	Method(GetMissionQueue);
 	Method(GetBestBuildRoute);
 	Method(GetMeleeAttackFromPlot);
@@ -940,6 +941,58 @@ int CvLuaUnit::lGeneratePathToNextWaypoint(lua_State* L)
 		lua_pushboolean(L, newPath.get(i)->isVisible(pkUnit->getTeam()) == false); //don't have that info, make it up
 		lua_setfield(L, t, "Invisible");
 		lua_pushboolean(L, newPath.get(i)->isAdjacentNonvisible(pkUnit->getTeam())); //don't have that info, make it up
+		lua_setfield(L, t, "AdjInvisible");
+		lua_rawseti(L, -2, iCount++);
+	}
+
+	return 1;
+}
+//------------------------------------------------------------------------------
+// CIVVACCESS: Like GeneratePath, but honours a caller-supplied pathfinder
+// flag mask instead of hardcoding MOVEFLAG_IGNORE_STACKING_SELF, and runs
+// the search unbounded (INT_MAX turns). The Civ-V-Access pathfinder
+// diagnostics need a STRICT search (no flags) -- VP's stock GeneratePath
+// silently ignores own-unit stacking, which both over-reports reachability
+// (a tile blocked only by the player's own stack reads as reachable) and
+// disables the discriminative retries (a relaxation that's already baked
+// into the strict search can never be the cause that recovers a path).
+// With explicit flags the seam runs a true strict search (flags 0, matching
+// what selectionListMove pushes for a manual move) and then re-runs with
+// one relaxation at a time (IGNORE_STACKING_SELF, IGNORE_ENEMIES,
+// IGNORE_RIGHT_OF_PASSAGE) to name the blocker. Same node-array payload as
+// GeneratePath so the seam consumes it identically.
+int CvLuaUnit::lGeneratePathWithFlags(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+	CvPlot* pkPlot = CvLuaPlot::GetInstance(L, 2);
+	const int iFlags = luaL_optint(L, 3, 0);
+
+	lua_createtable(L, 0, 0);
+	int iCount = 1;
+
+	//no caching!
+	SPathFinderUserData data(pkUnit, iFlags, INT_MAX);
+	SPath newPath = GC.GetPathFinder().GetPath(pkUnit->getX(), pkUnit->getY(), pkPlot->getX(), pkPlot->getY(), data, TC_UI);
+
+	for (int i = 0; i < newPath.length(); i++)
+	{
+		const SPathNode& kNode = newPath.vPlots[i];
+
+		lua_createtable(L, 0, 0);
+		const int t = lua_gettop(L);
+		lua_pushinteger(L, kNode.x);
+		lua_setfield(L, t, "X");
+		lua_pushinteger(L, kNode.y);
+		lua_setfield(L, t, "Y");
+		lua_pushinteger(L, kNode.moves);
+		lua_setfield(L, t, "RemainingMovement");
+		lua_pushinteger(L, kNode.turns);
+		lua_setfield(L, t, "Turn");
+		lua_pushinteger(L, 0);
+		lua_setfield(L, t, "Flags");
+		lua_pushboolean(L, newPath.get(i)->isVisible(pkUnit->getTeam()) == false);
+		lua_setfield(L, t, "Invisible");
+		lua_pushboolean(L, newPath.get(i)->isAdjacentNonvisible(pkUnit->getTeam()));
 		lua_setfield(L, t, "AdjInvisible");
 		lua_rawseti(L, -2, iCount++);
 	}
