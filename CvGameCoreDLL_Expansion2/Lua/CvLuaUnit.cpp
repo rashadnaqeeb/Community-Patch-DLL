@@ -218,6 +218,8 @@ void CvLuaUnit::PushMethods(lua_State* L, int t)
 	Method(CancelSquadMove);
 	Method(IsSquadMoving);
 	Method(GetSquadTurnsRemaining);
+	Method(GetSquadDestination);
+	Method(GetSquadEndMovementType);
 
 	Method(Range);
 	Method(NukeDamageLevel);
@@ -2874,6 +2876,34 @@ int CvLuaUnit::lGetSquadTurnsRemaining(lua_State* L)
 {
 	CvUnit* pkUnit = GetInstance(L);
 	lua_pushinteger(L, pkUnit->GetSquadTurnsRemaining());
+	return 1;
+}
+//------------------------------------------------------------------------------
+// CvPlot* GetSquadDestination()
+// CIVVACCESS: the squad's stored move objective, or nil when none is set. The
+// destination is fanned to every member, so it can be read off any member.
+int CvLuaUnit::lGetSquadDestination(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+	CvPlot* pkPlot = pkUnit->GetSquadDestination();
+	if (pkPlot == NULL)
+	{
+		lua_pushnil(L);
+		return 1;
+	}
+	CvLuaPlot::Push(L, pkPlot);
+	return 1;
+}
+//------------------------------------------------------------------------------
+// int GetSquadEndMovementType()
+// CIVVACCESS: the unit's per-member end-of-move behavior (0 alert on arrival,
+// 1 wake on each arrival, 2 wake when all arrive) -- the value
+// TryEndSquadMovement reads to decide a hold. The setter is already bound;
+// this exposes the read.
+int CvLuaUnit::lGetSquadEndMovementType(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+	lua_pushinteger(L, (int)pkUnit->GetSquadEndMovementType());
 	return 1;
 }
 //------------------------------------------------------------------------------
