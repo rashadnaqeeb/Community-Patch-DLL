@@ -4515,6 +4515,63 @@ void CvUnit::doCommand(CommandTypes eCommand, int iData1, int iData2)
 {
 	VALIDATE_OBJECT();
 	bool bCycle = false;
+
+	// CIVVACCESS: Squad-state mutations ride the COMMAND_HOTKEY channel with an
+	// out-of-range iData1 discriminator (see CivVAccessSquadCommand in CvUnit.h) so they
+	// sync across all clients in multiplayer. Handle them here, ahead of the canDoCommand
+	// gate, so the same mutation applies uniformly on every client regardless of per-unit
+	// command eligibility. This runs on every client because the command is network-
+	// dispatched, so the state ends up identical everywhere -- which is what makes the
+	// lockstep reroute and wake-all deterministic.
+	if (eCommand == COMMAND_HOTKEY && iData1 >= CIVVACCESS_SQUAD_CMD_BASE)
+	{
+		switch (iData1)
+		{
+		case CIVVACCESS_SQUAD_CMD_ASSIGN:
+			AssignToSquad(iData2);
+			break;
+		case CIVVACCESS_SQUAD_CMD_REMOVE:
+			RemoveFromSquad();
+			break;
+		case CIVVACCESS_SQUAD_CMD_SET_END_MODE:
+		{
+			// CIVVACCESS: apply the end-movement mode to every member so the squad shares
+			// one mode (TryEndSquadMovement's wake-all check reads it per member).
+			SquadsEndMovementType eMode = (SquadsEndMovementType)iData2;
+			if (GetSquadNumber() == -1)
+			{
+				SetSquadEndMovementType(eMode);
+			}
+			else
+			{
+				CvPlayer& kModePlayer = GET_PLAYER(getOwner());
+				int iModeLoop = 0;
+				for (CvUnit* pModeUnit = kModePlayer.firstUnitInSquad(&iModeLoop, GetSquadNumber()); pModeUnit != NULL; pModeUnit = kModePlayer.nextUnitInSquad(&iModeLoop, GetSquadNumber()))
+				{
+					pModeUnit->SetSquadEndMovementType(eMode);
+				}
+			}
+			break;
+		}
+		case CIVVACCESS_SQUAD_CMD_SET_DEST:
+			if (iData2 < 0)
+			{
+				SetSquadDestination(NULL);
+			}
+			else
+			{
+				SetSquadDestination(GC.getMap().plotCheckInvalid(iData2 / CIVVACCESS_SQUAD_COORD_STRIDE, iData2 % CIVVACCESS_SQUAD_COORD_STRIDE));
+			}
+			break;
+		case CIVVACCESS_SQUAD_CMD_CANCEL:
+			CancelSquadMove();
+			break;
+		default:
+			break;
+		}
+		return;
+	}
+
 	if(canDoCommand(eCommand, iData1, iData2))
 	{
 		switch(eCommand)
@@ -15539,7 +15596,14 @@ void CvUnit::DoSquadMovement(CvPlot* pDestPlot, bool escort)
 
 	std::map<CvUnit*, CvPlot*> unitToPlotMap = DoSquadPlotAssignments(pDestPlot, escort, false);
 
-	SetSquadDestination(pDestPlot);
+	// CIVVACCESS: sync the squad destination to every client before the move missions
+	// execute, so the lockstep reroute reads it everywhere. This runs only on the owner
+	// (DoSquadMovement is owner-issued from the Lua binding); the destination is what must
+	// be synced. The member moves below stay on VP's existing synced sendPushMission path
+	// unchanged. The set-dest command is dispatched before the moves so it is applied
+	// first in the FIFO command queue. (Replaces the prior local SetSquadDestination call.)
+	gDLL->sendDoCommand(GetID(), COMMAND_HOTKEY, CIVVACCESS_SQUAD_CMD_SET_DEST,
+		pDestPlot->getX() * CIVVACCESS_SQUAD_COORD_STRIDE + pDestPlot->getY(), false);
 
 	// Now that we have all the units to move and tiles for them, send the move missions
 	for (std::map<CvUnit*, CvPlot*>::iterator it = unitToPlotMap.begin(); it != unitToPlotMap.end(); ++it)
@@ -15577,6 +15641,74 @@ void CvUnit::GetSquadMovementPreview(std::vector<CvPlot*>& pPlotList, CvPlot* pD
 	for (std::set<CvPlot*>::iterator it = uniqueDestPlots.begin(); it != uniqueDestPlots.end(); ++it) {
 		pPlotList.push_back(*it);
 	}
+}
+
+//	--------------------------------------------------------------------------------
+// CIVVACCESS: Returns the number of turns until every squad member would finish moving to
+// the given destination -- the max over members of the turn count of each member's path to
+// its assigned ring plot. Read-only: uses the compute-only assignment (no mission queues
+// touched) and a throwaway pathfinder query per member (no path cache written). 0 when the
+// squad is empty or no member can reach its plot. Called as a query on the owner's client;
+// it does not need to be synced.
+int CvUnit::GetSquadMovementPreviewTurns(CvPlot* pDestPlot)
+{
+	VALIDATE_OBJECT();
+
+	std::map<CvUnit*, CvPlot*> unitToPlotMap = DoSquadPlotAssignments(pDestPlot, false, true);
+
+	int iMaxTurns = 0;
+	for (std::map<CvUnit*, CvPlot*>::iterator it = unitToPlotMap.begin(); it != unitToPlotMap.end(); ++it)
+	{
+		CvUnit* pMember = it->first;
+		CvPlot* pTarget = it->second;
+		if (!pMember || !pTarget)
+			continue;
+
+		SPathFinderUserData data(pMember, CvUnit::MOVEFLAG_DESTINATION, INT_MAX);
+		SPath path = GC.GetPathFinder().GetPath(pMember->getX(), pMember->getY(), pTarget->getX(), pTarget->getY(), data);
+		if (!!path && path.iTotalTurns > iMaxTurns)
+			iMaxTurns = path.iTotalTurns;
+	}
+
+	return iMaxTurns;
+}
+
+//	--------------------------------------------------------------------------------
+// CIVVACCESS: Cancel an in-progress squad move: clear the squad destination on all members
+// and stop their missions. Dispatched through the synced command channel (see
+// CivVAccessSquadCommand), so this runs on every client and uses only local mutations.
+void CvUnit::CancelSquadMove()
+{
+	VALIDATE_OBJECT();
+
+	if (GetSquadNumber() == -1)
+		return;
+
+	CvPlayer* pPlayer = &GET_PLAYER(getOwner());
+	int iLoop = 0;
+	CvUnit* pLoopUnit = NULL;
+	for (pLoopUnit = pPlayer->firstUnitInSquad(&iLoop, GetSquadNumber()); pLoopUnit != NULL; pLoopUnit = pPlayer->nextUnitInSquad(&iLoop, GetSquadNumber()))
+	{
+		pLoopUnit->ClearMissionQueue();
+		pLoopUnit->SetActivityType(ACTIVITY_AWAKE);
+	}
+	SetSquadDestination(NULL);
+}
+
+//	--------------------------------------------------------------------------------
+// CIVVACCESS: Turns until the squad's in-progress move finishes, computed live against
+// the stored squad destination from members' current positions. 0 when the squad is not
+// currently moving (so the UI can speak movement status only while a move is underway --
+// HasSquadDestination alone is not reliable, since the alert/wake-each modes leave the
+// destination set after arrival; IsSquadMoving is the authoritative in-progress signal).
+int CvUnit::GetSquadTurnsRemaining()
+{
+	VALIDATE_OBJECT();
+
+	if (!IsSquadMoving() || !HasSquadDestination())
+		return 0;
+
+	return GetSquadMovementPreviewTurns(GetSquadDestination());
 }
 
 //	--------------------------------------------------------------------------------
@@ -15668,30 +15800,42 @@ void CvUnit::TryEndSquadMovement()
 		{
 			// Linked units don't get their own move missions that would trigger a call to this function
 			// so handle them alongside the leader
+			// CIVVACCESS: TryEndSquadMovement is driven from CvUnitMission::ContinueMission,
+			// which runs inside the lockstep simulation on every client. With squad state
+			// now synced, this function no longer early-returns on non-owner clients, so it
+			// runs everywhere -- meaning the sentry/sleep issuance must be a LOCAL PushMission
+			// on each client, not gDLL->sendPushMission (which would have every client
+			// re-broadcast the mission, duplicating it). VP's original sendPushMission here
+			// only worked by accident of the unsynced-state early-return; syncing the state
+			// requires this change in tandem.
 			if (IsLinkedLeader())
 			{
 				UnitIdContainer LinkedUnitIDs = GetLinkedUnits();
 				for (int iI = 0; iI < (int)LinkedUnitIDs.size(); iI++)
 				{
 					CvUnit* pLinkedUnit = GET_PLAYER(m_eOwner).getUnit(LinkedUnitIDs[iI]);
+					// CIVVACCESS: a linked unit may have died; this now runs on every
+					// client (squad state is synced), so a stale id must not crash it.
+					if (!pLinkedUnit)
+						continue;
 					if (pLinkedUnit->canSentry(plot()))
 					{
-						gDLL->sendPushMission(pLinkedUnit->GetID(), CvTypes::getMISSION_ALERT(), 0, 0, 0, false);
+						pLinkedUnit->PushMission(CvTypes::getMISSION_ALERT(), 0, 0, 0, false);
 					}
 					else
 					{
-						gDLL->sendPushMission(pLinkedUnit->GetID(), CvTypes::getMISSION_SLEEP(), 0, 0, 0, false);
+						pLinkedUnit->PushMission(CvTypes::getMISSION_SLEEP(), 0, 0, 0, false);
 					}
 				}
 			}
 
 			if (canSentry(plot()))
 			{
-				gDLL->sendPushMission(GetID(), CvTypes::getMISSION_ALERT(), 0, 0, 0, false);
+				PushMission(CvTypes::getMISSION_ALERT(), 0, 0, 0, false);
 			}
 			else
 			{
-				gDLL->sendPushMission(GetID(), CvTypes::getMISSION_SLEEP(), 0, 0, 0, false);
+				PushMission(CvTypes::getMISSION_SLEEP(), 0, 0, 0, false);
 			}
 		}
 
@@ -15716,12 +15860,20 @@ void CvUnit::SetSquadDestination(CvPlot* pDestPlot)
 		m_iSquadDestinationY = -1;
 	}
 
-	CvUnit* pLoopUnit = NULL;
-	int iLoop = 0;
-	for(pLoopUnit = pPlayer->firstUnitInSquad(&iLoop, GetSquadNumber()); pLoopUnit != NULL; pLoopUnit = pPlayer->nextUnitInSquad(&iLoop, GetSquadNumber()))
+	// CIVVACCESS: only fan the destination out to squad members when actually in a
+	// squad. firstUnitInSquad(-1) would otherwise match every unassigned unit (-1 is
+	// the no-squad sentinel) and clobber their destinations. Our synced paths already
+	// call this only on squad members, but this is the fan-out the multiplayer sync
+	// relies on, so guard it at the root.
+	if (GetSquadNumber() != -1)
 	{
-		pLoopUnit->m_iSquadDestinationX = m_iSquadDestinationX;
-		pLoopUnit->m_iSquadDestinationY = m_iSquadDestinationY;
+		CvUnit* pLoopUnit = NULL;
+		int iLoop = 0;
+		for(pLoopUnit = pPlayer->firstUnitInSquad(&iLoop, GetSquadNumber()); pLoopUnit != NULL; pLoopUnit = pPlayer->nextUnitInSquad(&iLoop, GetSquadNumber()))
+		{
+			pLoopUnit->m_iSquadDestinationX = m_iSquadDestinationX;
+			pLoopUnit->m_iSquadDestinationY = m_iSquadDestinationY;
+		}
 	}
 }
 

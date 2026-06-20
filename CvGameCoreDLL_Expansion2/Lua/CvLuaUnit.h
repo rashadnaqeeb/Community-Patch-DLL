@@ -207,6 +207,10 @@ protected:
 	static int lDoSquadMovement(lua_State* L);
 	static int lSetSquadEndMovementType(lua_State* L);
 	static int lGetSquadMovementPreview(lua_State* L);
+	static int lGetSquadMovementPreviewTurns(lua_State* L);
+	static int lCancelSquadMove(lua_State* L);
+	static int lIsSquadMoving(lua_State* L);
+	static int lGetSquadTurnsRemaining(lua_State* L);
 
 	static int lRange(lua_State* L);
 	static int lNukeDamageLevel(lua_State* L);

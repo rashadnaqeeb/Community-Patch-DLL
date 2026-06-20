@@ -214,6 +214,10 @@ void CvLuaUnit::PushMethods(lua_State* L, int t)
 	Method(DoSquadMovement);
 	Method(SetSquadEndMovementType);
 	Method(GetSquadMovementPreview);
+	Method(GetSquadMovementPreviewTurns);
+	Method(CancelSquadMove);
+	Method(IsSquadMoving);
+	Method(GetSquadTurnsRemaining);
 
 	Method(Range);
 	Method(NukeDamageLevel);
@@ -2774,7 +2778,9 @@ int CvLuaUnit::lAssignToSquad(lua_State* L)
 	CvUnit* pkUnit = GetInstance(L);
 	const int iNewValue = lua_tointeger(L, 2);
 
-	pkUnit->AssignToSquad(iNewValue);
+	// CIVVACCESS: dispatch through the synced command channel so squad membership
+	// applies on every client (see CivVAccessSquadCommand in CvUnit.h).
+	gDLL->sendDoCommand(pkUnit->GetID(), COMMAND_HOTKEY, CIVVACCESS_SQUAD_CMD_ASSIGN, iNewValue, false);
 	return 0;
 }
 //------------------------------------------------------------------------------
@@ -2783,7 +2789,8 @@ int CvLuaUnit::lRemoveFromSquad(lua_State* L)
 {
 	CvUnit* pkUnit = GetInstance(L);
 
-	pkUnit->RemoveFromSquad();
+	// CIVVACCESS: synced command channel (see CivVAccessSquadCommand in CvUnit.h).
+	gDLL->sendDoCommand(pkUnit->GetID(), COMMAND_HOTKEY, CIVVACCESS_SQUAD_CMD_REMOVE, -1, false);
 	return 0;
 }
 //------------------------------------------------------------------------------
@@ -2804,7 +2811,8 @@ int CvLuaUnit::lSetSquadEndMovementType(lua_State* L)
 	CvUnit* pkUnit = GetInstance(L);
 	const SquadsEndMovementType iNewValue = (SquadsEndMovementType)lua_tointeger(L, 2);
 
-	pkUnit->SetSquadEndMovementType(iNewValue);
+	// CIVVACCESS: synced command channel (see CivVAccessSquadCommand in CvUnit.h).
+	gDLL->sendDoCommand(pkUnit->GetID(), COMMAND_HOTKEY, CIVVACCESS_SQUAD_CMD_SET_END_MODE, (int)iNewValue, false);
 	return 0;
 }
 //------------------------------------------------------------------------------
@@ -2830,6 +2838,43 @@ int CvLuaUnit::lGetSquadMovementPreview(lua_State* L)
 	}
 
     return iReturnValues;
+}
+//------------------------------------------------------------------------------
+// int GetSquadMovementPreviewTurns(CvPlot* pDestPlot)
+int CvLuaUnit::lGetSquadMovementPreviewTurns(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+	CvPlot* pkDestPlot = CvLuaPlot::GetInstance(L, 2);
+
+	const int iResult = pkUnit->GetSquadMovementPreviewTurns(pkDestPlot);
+	lua_pushinteger(L, iResult);
+	return 1;
+}
+//------------------------------------------------------------------------------
+// CancelSquadMove()
+int CvLuaUnit::lCancelSquadMove(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+
+	// CIVVACCESS: synced command channel (see CivVAccessSquadCommand in CvUnit.h).
+	gDLL->sendDoCommand(pkUnit->GetID(), COMMAND_HOTKEY, CIVVACCESS_SQUAD_CMD_CANCEL, -1, false);
+	return 0;
+}
+//------------------------------------------------------------------------------
+// bool IsSquadMoving()
+int CvLuaUnit::lIsSquadMoving(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+	lua_pushboolean(L, pkUnit->IsSquadMoving());
+	return 1;
+}
+//------------------------------------------------------------------------------
+// int GetSquadTurnsRemaining()
+int CvLuaUnit::lGetSquadTurnsRemaining(lua_State* L)
+{
+	CvUnit* pkUnit = GetInstance(L);
+	lua_pushinteger(L, pkUnit->GetSquadTurnsRemaining());
+	return 1;
 }
 //------------------------------------------------------------------------------
 //int GetRange();
