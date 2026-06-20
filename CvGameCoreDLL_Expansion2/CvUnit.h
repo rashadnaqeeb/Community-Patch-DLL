@@ -410,6 +410,26 @@ enum SquadsEndMovementType
 	WAKE_ON_ALL_ARRIVED = 2
 };
 
+// CIVVACCESS: Squad-state mutations must apply on every client in multiplayer, or the
+// lockstep reroute (CvUnit::UnitPathTo/ComputePath) and wake-all check
+// (CvUnit::TryEndSquadMovement, from CvUnitMission::ContinueMission) read divergent
+// squad state across clients and desync. VP mutates this state only on the owner's
+// client, which is the defect. We sync it by riding the existing COMMAND_HOTKEY channel
+// (a stock enum the host EXE already accepts on the wire) with an out-of-range iData1
+// discriminator, decoded in CvUnit::doCommand ahead of the canDoCommand gate. The squad
+// destination packs into iData2 as x * STRIDE + y (>= 0), or -1 to clear. See the
+// CivVAccess cp-vp-support docs.
+enum CivVAccessSquadCommand
+{
+	CIVVACCESS_SQUAD_CMD_BASE         = 1000, // iData1 >= this means "squad sub-command"
+	CIVVACCESS_SQUAD_CMD_ASSIGN       = 1000, // iData2 = squad number
+	CIVVACCESS_SQUAD_CMD_REMOVE       = 1001, // iData2 unused
+	CIVVACCESS_SQUAD_CMD_SET_END_MODE = 1002, // iData2 = SquadsEndMovementType value
+	CIVVACCESS_SQUAD_CMD_SET_DEST     = 1003, // iData2 = destX * STRIDE + destY, or -1 to clear
+	CIVVACCESS_SQUAD_CMD_CANCEL       = 1004, // iData2 unused
+};
+static const int CIVVACCESS_SQUAD_COORD_STRIDE = 10000;
+
 class CvUnit
 {
 	friend class CvUnitMission;
@@ -873,6 +893,9 @@ public:
 	std::map<CvUnit*, CvPlot*> DoSquadPlotAssignments(CvPlot* pDestPlot, bool escort, bool computeOnly);
 	void DoSquadMovement(CvPlot* pDestPlot, bool escort);
 	void GetSquadMovementPreview(std::vector<CvPlot*>& pPlotList, CvPlot* pDestPlot);
+	int GetSquadMovementPreviewTurns(CvPlot* pDestPlot); // CIVVACCESS: max turns until all members finish
+	void CancelSquadMove(); // CIVVACCESS: clear squad destination + stop members
+	int GetSquadTurnsRemaining(); // CIVVACCESS: turns left on the in-progress squad move, 0 if idle
 	bool IsUnitInActiveMoveMission();
 	bool IsSquadMoving();
 	bool SquadHasLink();
