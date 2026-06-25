@@ -2803,7 +2803,15 @@ int CvLuaUnit::lDoSquadMovement(lua_State* L)
 	CvPlot* pkDestPlot = CvLuaPlot::GetInstance(L, 2);
 	const int bEscort = lua_toboolean(L, 3);
 
-	pkUnit->DoSquadMovement(pkDestPlot, bEscort);
+	// CIVVACCESS: dispatch through the synced command channel (like the other squad
+	// mutations) so the escort linking and the member moves apply on every client. The
+	// prior direct call ran DoSquadMovement on the issuing client only, so the escort
+	// links -- and the link-following members' moves -- never reached other clients, a
+	// multiplayer desync. The destination plot packs into iData2; the escort flag rides
+	// the discriminator (see CivVAccessSquadCommand in CvUnit.h).
+	gDLL->sendDoCommand(pkUnit->GetID(), COMMAND_HOTKEY,
+		bEscort ? CIVVACCESS_SQUAD_CMD_MOVE_ESCORT : CIVVACCESS_SQUAD_CMD_MOVE,
+		pkDestPlot->getX() * CIVVACCESS_SQUAD_COORD_STRIDE + pkDestPlot->getY(), false);
 	return 0;
 }
 //------------------------------------------------------------------------------

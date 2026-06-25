@@ -4566,6 +4566,23 @@ void CvUnit::doCommand(CommandTypes eCommand, int iData1, int iData2)
 		case CIVVACCESS_SQUAD_CMD_CANCEL:
 			CancelSquadMove();
 			break;
+		case CIVVACCESS_SQUAD_CMD_MOVE:
+		case CIVVACCESS_SQUAD_CMD_MOVE_ESCORT:
+		{
+			// CIVVACCESS: run the squad move on every client from the synced command, so the
+			// escort linking and the member moves are identical everywhere. DoSquadMovement
+			// uses only local mutations here (SetSquadDestination + local PushMission) -- the
+			// network command is what carries the sync. Flag the net-message dispatch context
+			// so the local PushMissions don't trip the human-outside-net-message protocol log.
+			CvPlot* pkDestPlot = GC.getMap().plotCheckInvalid(iData2 / CIVVACCESS_SQUAD_COORD_STRIDE, iData2 % CIVVACCESS_SQUAD_COORD_STRIDE);
+			if (pkDestPlot)
+			{
+				CvUnit::dispatchingNetMessage(true);
+				DoSquadMovement(pkDestPlot, iData1 == CIVVACCESS_SQUAD_CMD_MOVE_ESCORT);
+				CvUnit::dispatchingNetMessage(false);
+			}
+			break;
+		}
 		default:
 			break;
 		}
@@ -15594,32 +15611,46 @@ void CvUnit::DoSquadMovement(CvPlot* pDestPlot, bool escort)
 {
 	VALIDATE_OBJECT();
 
+	// CIVVACCESS: this runs on every client, dispatched from the synced squad-move command
+	// (CIVVACCESS_SQUAD_CMD_MOVE[_ESCORT] in doCommand), so it uses only local mutations --
+	// the network command is what carries the sync. The plot assignment, escort linking, and
+	// member moves are all deterministic given the synced unit state (the assignment sorts
+	// are stable over unit-ID-ordered inputs), so every client computes the same result. The
+	// prior version ran on the owner only and networked the destination and member missions;
+	// the escort links done inside DoSquadPlotAssignments never reached other clients, which
+	// desynced the link state and the link-following members' positions.
 	std::map<CvUnit*, CvPlot*> unitToPlotMap = DoSquadPlotAssignments(pDestPlot, escort, false);
 
-	// CIVVACCESS: sync the squad destination to every client before the move missions
-	// execute, so the lockstep reroute reads it everywhere. This runs only on the owner
-	// (DoSquadMovement is owner-issued from the Lua binding); the destination is what must
-	// be synced. The member moves below stay on VP's existing synced sendPushMission path
-	// unchanged. The set-dest command is dispatched before the moves so it is applied
-	// first in the FIFO command queue. (Replaces the prior local SetSquadDestination call.)
-	gDLL->sendDoCommand(GetID(), COMMAND_HOTKEY, CIVVACCESS_SQUAD_CMD_SET_DEST,
-		pDestPlot->getX() * CIVVACCESS_SQUAD_COORD_STRIDE + pDestPlot->getY(), false);
+	// Local fan-out of the squad destination to every member (was a SET_DEST command).
+	SetSquadDestination(pDestPlot);
 
-	// Now that we have all the units to move and tiles for them, send the move missions
+	// Queue the member moves locally (was sendPushMission). Linked non-leaders follow their
+	// leader via MOVEFLAG_KEEP_LINK, so only leaders and unlinked units get their own move.
+	//
+	// PushMission starts the mission immediately (InsertAtEndMissionQueue -> StartMission), so
+	// the order the members move is observable: with MOVEFLAG_CONTINUE_TO_CLOSEST_PLOT and
+	// shared intermediate tiles, an earlier move can change a later unit's reachable plot.
+	// unitToPlotMap is keyed by CvUnit*, so iterating it directly walks per-machine pointer
+	// order and would desync the moves across clients. Re-key by unit ID (synced and identical
+	// everywhere) so every client queues and executes the moves in the same lockstep order.
+	std::map<int, std::pair<CvUnit*, CvPlot*> > orderedMoves;
 	for (std::map<CvUnit*, CvPlot*>::iterator it = unitToPlotMap.begin(); it != unitToPlotMap.end(); ++it)
 	{
 		CvUnit* pLoopUnit = it->first;
-		CvPlot* targetPlot = it->second;
-
 		if (!pLoopUnit->IsLinked() || pLoopUnit->IsLinkedLeader())
-		{
-			gDLL->sendPushMission(pLoopUnit->GetID(),
-				CvTypes::getMISSION_MOVE_TO(),
-				targetPlot->getX(),
-				targetPlot->getY(),
-				CvUnit::MOVEFLAG_ABORT_IF_NEW_ENEMY_REVEALED | CvUnit::MOVEFLAG_CONTINUE_TO_CLOSEST_PLOT | CvUnit::MOVEFLAG_KEEP_LINK,
-				false);
-		}
+			orderedMoves[pLoopUnit->GetID()] = std::make_pair(pLoopUnit, it->second);
+	}
+
+	for (std::map<int, std::pair<CvUnit*, CvPlot*> >::iterator it = orderedMoves.begin(); it != orderedMoves.end(); ++it)
+	{
+		CvUnit* pLoopUnit = it->second.first;
+		CvPlot* targetPlot = it->second.second;
+
+		pLoopUnit->PushMission(CvTypes::getMISSION_MOVE_TO(),
+			targetPlot->getX(),
+			targetPlot->getY(),
+			CvUnit::MOVEFLAG_ABORT_IF_NEW_ENEMY_REVEALED | CvUnit::MOVEFLAG_CONTINUE_TO_CLOSEST_PLOT | CvUnit::MOVEFLAG_KEEP_LINK,
+			false, true);
 	}
 }
 
