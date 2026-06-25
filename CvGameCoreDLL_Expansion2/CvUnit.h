@@ -427,6 +427,8 @@ enum CivVAccessSquadCommand
 	CIVVACCESS_SQUAD_CMD_SET_END_MODE = 1002, // iData2 = SquadsEndMovementType value
 	CIVVACCESS_SQUAD_CMD_SET_DEST     = 1003, // iData2 = destX * STRIDE + destY, or -1 to clear
 	CIVVACCESS_SQUAD_CMD_CANCEL       = 1004, // iData2 unused
+	CIVVACCESS_SQUAD_CMD_MOVE         = 1005, // iData2 = destX * STRIDE + destY; escort off
+	CIVVACCESS_SQUAD_CMD_MOVE_ESCORT  = 1006, // iData2 = destX * STRIDE + destY; escort on
 };
 static const int CIVVACCESS_SQUAD_COORD_STRIDE = 10000;
 
