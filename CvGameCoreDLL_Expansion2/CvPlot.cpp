@@ -8,6 +8,8 @@
 
 #include "CvGameCoreDLLPCH.h"
 #include "CvPlot.h"
+// CIVVACCESS: deferred hand-off for the mod's hot hooks.
+#include "CivVAccessEventQueue.h"
 #include "CvCity.h"
 #include "CvUnit.h"
 #include "CvGlobals.h"
@@ -12040,18 +12042,17 @@ bool CvPlot::setRevealed(TeamTypes eTeam, bool bNewValue, CvUnit* pUnit, bool bT
 		// not on visibility flips of already-revealed tiles. Gated on
 		// bNewValue so unreveal flips (raze, etc.) don't fire, and on
 		// non-barbarian teams to mirror the natural-wonder hook below.
+		//
+		// Queued rather than dispatched to Lua here: this runs on the game-core
+		// thread inside the simulation, and calling Lua from there is one half
+		// of a deadlock against the UI thread. See CivVAccessEventQueue.h.
 		if(bNewValue && eTeam != BARBARIAN_TEAM)
 		{
-			ICvEngineScriptSystem1* pkScriptSystem = gDLL->GetScriptSystem();
-			if(pkScriptSystem)
-			{
-				CvLuaArgsHandle args;
-				args->Push(eTeam);
-				args->Push(getX());
-				args->Push(getY());
-				bool bResult = false;
-				LuaSupport::CallHook(pkScriptSystem, "CivVAccessPlotRevealed", args.get(), bResult);
-			}
+			int aiArgs[3];
+			aiArgs[0] = eTeam;
+			aiArgs[1] = getX();
+			aiArgs[2] = getY();
+			CivVAccessEventQueue::Push("CivVAccessPlotRevealed", 3, aiArgs);
 		}
 
 		bool bEligibleForAchievement = MOD_ENABLE_ACHIEVEMENTS ? GET_PLAYER(GC.getGame().getActivePlayer()).isHuman(ISHUMAN_ACHIEVEMENTS) && !GC.getGame().isGameMultiPlayer() : false;

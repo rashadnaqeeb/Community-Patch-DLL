@@ -8,6 +8,8 @@
 
 #include "CvGameCoreDLLPCH.h"
 #include "CvUnit.h"
+// CIVVACCESS: deferred hand-off for the mod's hot hooks.
+#include "CivVAccessEventQueue.h"
 
 #include "CvAStar.h"
 #include "CvAchievementUnlocker.h"
@@ -21449,17 +21451,23 @@ void CvUnit::setXY(int iX, int iY, bool bGroup, bool bUpdate, bool bShow, bool b
 	// teleports (distance > 1) are told apart on the Lua side via PlotDistance.
 	// The engine's own UnitSetXY hook above carries no from-coords, which is
 	// why this sibling exists.
-	if(pkScriptSystem && pOldPlot != NULL && pNewPlot != NULL && pOldPlot != pNewPlot)
+	//
+	// Queued rather than dispatched to Lua here: setXY runs on the game-core
+	// thread deep inside the simulation, and calling Lua from there is one half
+	// of a deadlock against the UI thread. This is the highest-frequency hook
+	// the mod adds, so it was also the biggest contributor. See
+	// CivVAccessEventQueue.h. No longer gated on pkScriptSystem -- the queue
+	// does not need it; the engine's own UnitSetXY hook above still does.
+	if(pOldPlot != NULL && pNewPlot != NULL && pOldPlot != pNewPlot)
 	{
-		CvLuaArgsHandle args;
-		args->Push(getOwner());
-		args->Push(GetID());
-		args->Push(pOldPlot->getX());
-		args->Push(pOldPlot->getY());
-		args->Push(pNewPlot->getX());
-		args->Push(pNewPlot->getY());
-		bool bResult = false;
-		LuaSupport::CallHook(pkScriptSystem, "CivVAccessUnitMoved", args.get(), bResult);
+		int aiArgs[6];
+		aiArgs[0] = getOwner();
+		aiArgs[1] = GetID();
+		aiArgs[2] = pOldPlot->getX();
+		aiArgs[3] = pOldPlot->getY();
+		aiArgs[4] = pNewPlot->getX();
+		aiArgs[5] = pNewPlot->getY();
+		CivVAccessEventQueue::Push("CivVAccessUnitMoved", 6, aiArgs);
 	}
 
 	//Dr. Livingstone I presume?

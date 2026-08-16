@@ -111,6 +111,8 @@ CPP = [
     'CvGameCoreDLL_Expansion2\\Lua\\CvLuaTeam.cpp',
     'CvGameCoreDLL_Expansion2\\Lua\\CvLuaTeamTech.cpp',
     'CvGameCoreDLL_Expansion2\\Lua\\CvLuaUnit.cpp',
+    # CIVVACCESS: deferred hand-off for the mod's hot engine hooks.
+    'CvGameCoreDLL_Expansion2\\CivVAccessEventQueue.cpp',
     'CvGameCoreDLL_Expansion2\\CustomMods.cpp',
     'CvGameCoreDLL_Expansion2\\CvAchievementInfo.cpp',
     'CvGameCoreDLL_Expansion2\\CvAchievementUnlocker.cpp',
