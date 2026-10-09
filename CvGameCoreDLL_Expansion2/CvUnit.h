@@ -880,7 +880,7 @@ public:
 	int GetLinkedMaxMoves() const;
 	void SetLinkedMaxMoves(int iValue);
 	bool CanLinkUnits();
-	void LinkUnits();
+	void LinkUnits(int iOnlySquadNumber = -1); // CIVVACCESS: >= 0 links only members of that squad
 	void UnlinkUnits();
 	void MoveLinkedLeader(CvPlot* pDestPlot);
 	void DoGroupMovement(CvPlot* pDestPlot);
@@ -899,9 +899,13 @@ public:
 	void CancelSquadMove(); // CIVVACCESS: clear squad destination + stop members
 	int GetSquadTurnsRemaining(); // CIVVACCESS: turns left on the in-progress squad move, 0 if idle
 	bool IsUnitInActiveMoveMission();
+	bool IsUnitInActiveSquadMoveMission(); // CIVVACCESS: active move that is part of a squad move
 	bool IsSquadMoving();
+	bool IsSquadMovingExcept(const CvUnit* pIgnore); // CIVVACCESS: as IsSquadMoving, not counting pIgnore
 	bool SquadHasLink();
 	void TryEndSquadMovement();
+	void HaltSquadMovement(); // CIVVACCESS: stop the whole squad's move, keeping escort links
+	static void FinishSquadMoveIfDone(PlayerTypes ePlayer, int iSquadNumber, const CvUnit* pIgnore); // CIVVACCESS
 	void SetSquadDestination(CvPlot* pDestPlot = NULL);
 	bool HasSquadDestination();
 	CvPlot* GetSquadDestination();
