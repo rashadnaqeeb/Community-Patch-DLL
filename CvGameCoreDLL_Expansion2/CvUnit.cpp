@@ -2066,6 +2066,15 @@ void CvUnit::convert(CvUnit* pUnit, bool bIsUpgrade, bool bIsGift)
 	setLeaderUnitType(pUnit->getLeaderUnitType());
 	SetNumGoodyHutsPopped(pUnit->GetNumGoodyHutsPopped());
 
+	// CIVVACCESS: keep squad membership across a replacement. Only the gold-upgrade path assigned
+	// it; ruin upgrades, unique-unit swaps, convert-on-damage, Impi and belief conversions all
+	// dropped the new unit out of its squad. Squad numbers are per player, so only carry it within
+	// one owner (a gifted unit starts outside any squad).
+	if (MOD_SQUADS && pUnit->GetSquadNumber() != -1 && pUnit->getOwner() == getOwner())
+	{
+		AssignToSquad(pUnit->GetSquadNumber());
+	}
+
 	pTransportUnit = pUnit->getTransportUnit();
 
 	if (pTransportUnit != NULL)
@@ -2164,6 +2173,13 @@ void CvUnit::kill(bool bDelay, PlayerTypes ePlayer /*= NO_PLAYER*/)
 
 	GET_PLAYER(eUnitOwner).removeFromArmy(m_iArmyId, GetID());
 	ClearMissionQueue();
+
+	// CIVVACCESS: if this was the squad's last unit still on its squad move, the move is over for
+	// the rest; end it so a wake-when-all-arrive squad does not hold at its destination forever.
+	if (MOD_SQUADS && GetSquadNumber() != -1)
+	{
+		FinishSquadMoveIfDone(eUnitOwner, GetSquadNumber(), this);
+	}
 
 	pPlot = plot();
 	ASSERT(pPlot != NULL, "Plot is not assigned a valid value");
@@ -15077,7 +15093,10 @@ bool CvUnit::CanLinkUnits()
 	return false;
 }
 //	--------------------------------------------------------------------------------
-void CvUnit::LinkUnits()
+// CIVVACCESS: iOnlySquadNumber >= 0 restricts the link to members of that squad, so a squad escort
+// does not sweep up unrelated units of ours sharing the escort's tile. -1 keeps VP's link-everything
+// behavior for the other callers.
+void CvUnit::LinkUnits(int iOnlySquadNumber)
 {
 	VALIDATE_OBJECT();
 
@@ -15101,7 +15120,8 @@ void CvUnit::LinkUnits()
 		pLoopUnit = ::GetPlayerUnit(*pUnitNode);
 		pUnitNode = pCurrentPlot->nextUnitNode(pUnitNode);
 
-		if (pLoopUnit->getOwner() == getOwner() && !pLoopUnit->isDelayedDeath() && !pLoopUnit->isTrade() && pLoopUnit->getDomainType() != DOMAIN_AIR)
+		if (pLoopUnit->getOwner() == getOwner() && !pLoopUnit->isDelayedDeath() && !pLoopUnit->isTrade() && pLoopUnit->getDomainType() != DOMAIN_AIR
+			&& (iOnlySquadNumber < 0 || pLoopUnit->GetSquadNumber() == iOnlySquadNumber))
 		{
 			if ((bIsOnSea && (pLoopUnit->getDomainType() == DOMAIN_SEA || pLoopUnit->isEmbarked())) || (!bIsOnSea && (pLoopUnit->getDomainType() == DOMAIN_LAND && !pLoopUnit->isEmbarked())))
 			{
@@ -15143,11 +15163,14 @@ void CvUnit::LinkUnits()
 			LinkedUnitIDs.push_back(pUnit->GetID());
 			pUnit->SetLinkedLeaderID(pLinkedLeader->GetID());
 
-			if (pLoopUnit->canFortify(pCurrentPlot)) {
-				pLoopUnit->PushMission(CvTypes::getMISSION_FORTIFY());
+			// CIVVACCESS: put the follower itself to rest. VP addressed pLoopUnit here, the stale
+			// cursor of the plot scan above (the last unit on the tile, possibly the leader or an
+			// unlinked unit), so the wrong unit was fortified or slept.
+			if (pUnit->canFortify(pCurrentPlot)) {
+				pUnit->PushMission(CvTypes::getMISSION_FORTIFY());
 			}
 			else {
-				pLoopUnit->PushMission(CvTypes::getMISSION_SLEEP());
+				pUnit->PushMission(CvTypes::getMISSION_SLEEP());
 			}
 		}
 	}
@@ -15271,18 +15294,50 @@ int CvUnit::GetSquadNumber() const
 	return m_iSquadNumber;
 }
 //	--------------------------------------------------------------------------------
+// CIVVACCESS: a joining unit takes the squad's current destination (or none) rather than keeping
+// one carried over from a previous squad, so every member agrees on where the squad is going and
+// any member answers IsSquadMoving / GetSquadDestination for the whole squad. Leaving a prior
+// squad goes through RemoveFromSquad so that squad is re-checked for a finished move.
 void CvUnit::AssignToSquad(int iNewSquadNumber)
 {
 	VALIDATE_OBJECT();
 
+	if (iNewSquadNumber < 0)
+	{
+		RemoveFromSquad();
+		return;
+	}
+	if (iNewSquadNumber == m_iSquadNumber)
+		return;
+	if (m_iSquadNumber != -1)
+		RemoveFromSquad();
+
+	// Looked up before this unit joins, so the member found is never this unit.
+	int iLoop = 0;
+	CvUnit* pMember = GET_PLAYER(getOwner()).firstUnitInSquad(&iLoop, iNewSquadNumber);
+	m_iSquadDestinationX = pMember ? pMember->m_iSquadDestinationX : -1;
+	m_iSquadDestinationY = pMember ? pMember->m_iSquadDestinationY : -1;
+
 	m_iSquadNumber = iNewSquadNumber;
 }
 //	--------------------------------------------------------------------------------
+// CIVVACCESS: leaving drops the squad destination and any escort link (a unit outside the squad
+// must not stay chained to, or keep dragging, squad members), and re-checks the squad left behind:
+// if this unit was the last one still moving, the rest of the squad's move is now finished.
 void CvUnit::RemoveFromSquad()
 {
 	VALIDATE_OBJECT();
 
+	const int iOldSquadNumber = m_iSquadNumber;
+	if (iOldSquadNumber == -1)
+		return;
+
 	m_iSquadNumber = -1;
+	m_iSquadDestinationX = -1;
+	m_iSquadDestinationY = -1;
+	UnlinkUnits();
+
+	FinishSquadMoveIfDone(getOwner(), iOldSquadNumber, NULL);
 }
 //	--------------------------------------------------------------------------------
 struct ScoredUnit
@@ -15329,9 +15384,13 @@ CvPlot* CvUnit::GetSquadCenterOfMass()
 
 	int iTotalX = 0;
 	int iTotalY = 0;
-	int iNumUnits = 0;
+	// CIVVACCESS: VP divided the totals by the squad iterator's position (an index into the
+	// player's whole unit list) instead of the member count, which pulled the centre toward the
+	// first member. Iterate with iLoop and count members in iNumUnits.
+	int iLoop = 0;
+	int iNumUnits = 1;
 
-	CvUnit* pUnit = pPlayer->firstUnitInSquad(&iNumUnits, squadNumber);
+	CvUnit* pUnit = pPlayer->firstUnitInSquad(&iLoop, squadNumber);
 
 	int iTotalX2 = 0;
 	int iTotalY2 = 0;
@@ -15342,7 +15401,7 @@ CvPlot* CvUnit::GetSquadCenterOfMass()
 	int iRefX = pUnit->getX();
 	int iRefY = pUnit->getY();
 
-	pUnit = pPlayer->nextUnitInSquad(&iNumUnits, squadNumber);
+	pUnit = pPlayer->nextUnitInSquad(&iLoop, squadNumber);
 	while (pUnit)
 	{
 		int iDX = pUnit->getX() - iRefX;
@@ -15367,8 +15426,9 @@ CvPlot* CvUnit::GetSquadCenterOfMass()
 		iTotalY += iDY;
 		iTotalX2 += iDX * iDX;
 		iTotalY2 += iDY * iDY;
+		iNumUnits++;
 
-		pUnit = pPlayer->nextUnitInSquad(&iNumUnits, squadNumber);
+		pUnit = pPlayer->nextUnitInSquad(&iLoop, squadNumber);
 	}
 
 	//finally, compute average
@@ -15576,7 +15636,7 @@ std::map<CvUnit*, CvPlot*> CvUnit::DoSquadPlotAssignments(CvPlot* pDestPlot, boo
 					CvUnit* pEligibleUnit = *jt;
 					if (pEligibleUnit->plot() == pStackingUnit->plot() && pEligibleUnit->CanLinkUnits())
 					{
-						pEligibleUnit->LinkUnits();
+						pEligibleUnit->LinkUnits(squadNumber); // CIVVACCESS: squad members only
 						break;
 					}
 				}
@@ -15588,7 +15648,7 @@ std::map<CvUnit*, CvPlot*> CvUnit::DoSquadPlotAssignments(CvPlot* pDestPlot, boo
 					CvUnit* pEligibleUnit = *jt;
 					if (pEligibleUnit->plot() == pStackingUnit->plot() && pEligibleUnit->CanLinkUnits())
 					{
-						pEligibleUnit->LinkUnits();
+						pEligibleUnit->LinkUnits(squadNumber); // CIVVACCESS: squad members only
 						break;
 					}
 				}
@@ -15608,6 +15668,14 @@ std::map<CvUnit*, CvPlot*> CvUnit::DoSquadPlotAssignments(CvPlot* pDestPlot, boo
 
 	return unitToPlotMap;
 }
+
+// CIVVACCESS: true while DoSquadMovement is handing out its member moves. Each PushMission runs
+// its move at once, so a member can arrive (or die attacking) before the later members have
+// their orders; with those members not yet moving, the squad would read as finished and end its
+// move early. TryEndSquadMovement and FinishSquadMoveIfDone defer to DoSquadMovement while this
+// is set, which runs the finish check itself once every move is out. The simulation is single-
+// threaded and identical on every client, so a file-scope flag is deterministic.
+static bool s_bDispatchingSquadMove = false;
 
 void CvUnit::DoSquadMovement(CvPlot* pDestPlot, bool escort)
 {
@@ -15643,8 +15711,16 @@ void CvUnit::DoSquadMovement(CvPlot* pDestPlot, bool escort)
 			orderedMoves[pLoopUnit->GetID()] = std::make_pair(pLoopUnit, it->second);
 	}
 
+	s_bDispatchingSquadMove = true;
 	for (std::map<int, std::pair<CvUnit*, CvPlot*> >::iterator it = orderedMoves.begin(); it != orderedMoves.end(); ++it)
 	{
+		// CIVVACCESS: each PushMission moves its unit at once, so a member queued earlier can reveal
+		// an enemy and halt the squad (HaltSquadMovement clears the squad destination) before the
+		// rest are ordered. Stop issuing moves then, or the remaining members would set off on a
+		// move that has already been called off.
+		if (!HasSquadDestination())
+			break;
+
 		CvUnit* pLoopUnit = it->second.first;
 		CvPlot* targetPlot = it->second.second;
 
@@ -15654,6 +15730,11 @@ void CvUnit::DoSquadMovement(CvPlot* pDestPlot, bool escort)
 			CvUnit::MOVEFLAG_ABORT_IF_NEW_ENEMY_REVEALED | CvUnit::MOVEFLAG_CONTINUE_TO_CLOSEST_PLOT | CvUnit::MOVEFLAG_KEEP_LINK,
 			false, true);
 	}
+	s_bDispatchingSquadMove = false;
+
+	// CIVVACCESS: every member may already have arrived (a short move) while the flag held the
+	// finish back; end the move now if so. No-op when a member is still moving or it was halted.
+	FinishSquadMoveIfDone(getOwner(), GetSquadNumber(), NULL);
 }
 
 void CvUnit::GetSquadMovementPreview(std::vector<CvPlot*>& pPlotList, CvPlot* pDestPlot)
@@ -15753,7 +15834,24 @@ bool CvUnit::IsUnitInActiveMoveMission()
 			!atPlot(*this->GetPathLastPlot()));
 }
 //	--------------------------------------------------------------------------------
+// CIVVACCESS: an active move that belongs to a squad move. Squad moves are the only human move
+// missions carrying MOVEFLAG_CONTINUE_TO_CLOSEST_PLOT (DoSquadMovement), so an ordinary move the
+// player gives one member, or the one-tile follow moves of linked escorts, do not count.
+bool CvUnit::IsUnitInActiveSquadMoveMission()
+{
+	return IsUnitInActiveMoveMission() && (GetHeadMissionData()->iFlags & CvUnit::MOVEFLAG_CONTINUE_TO_CLOSEST_PLOT);
+}
+//	--------------------------------------------------------------------------------
 bool CvUnit::IsSquadMoving()
+{
+	return IsSquadMovingExcept(NULL);
+}
+//	--------------------------------------------------------------------------------
+// CIVVACCESS: VP counted any active move mission of any member, so a member the player had sent
+// somewhere by hand kept the squad "moving" (and the wake-when-all-arrive hold waiting) forever.
+// Only squad-move missions count. pIgnore excludes one unit: the unit whose own squad move just
+// ended (TryEndSquadMovement), or one being killed.
+bool CvUnit::IsSquadMovingExcept(const CvUnit* pIgnore)
 {
 	VALIDATE_OBJECT();
 
@@ -15770,7 +15868,7 @@ bool CvUnit::IsSquadMoving()
 	CvUnit* pLoopUnit = NULL;
 	for(pLoopUnit = pPlayer->firstUnitInSquad(&iLoop, squadNumber); pLoopUnit != NULL; pLoopUnit = pPlayer->nextUnitInSquad(&iLoop, squadNumber))
 	{
-		if (pLoopUnit->IsUnitInActiveMoveMission())
+		if (pLoopUnit != pIgnore && pLoopUnit->IsUnitInActiveSquadMoveMission())
 		{
 			return true;
 		}
@@ -15813,21 +15911,23 @@ void CvUnit::TryEndSquadMovement()
 		return;
 	}
 
-	if (!IsSquadMoving() && GetSquadEndMovementType() == WAKE_ON_ALL_ARRIVED)
+	// CIVVACCESS: every caller (CvUnitMission::ContinueMission) is a point where this unit's own
+	// squad move has ended -- arrived, or unable to go on -- so it does not count itself as still
+	// moving. VP counted it, and when its path had just been cleared (no route left) it read as
+	// mid-move, so the last unit to stop never released a wake-when-all-arrive hold.
+	const bool bSquadDone = !s_bDispatchingSquadMove && !IsSquadMovingExcept(this);
+
+	if (bSquadDone && GetSquadEndMovementType() == WAKE_ON_ALL_ARRIVED)
 	{
 		// When squad is done moving, wake up all units
-		CvPlayer* pPlayer = &GET_PLAYER(getOwner());
-		int iLoop = 0;
-		CvUnit* pLoopUnit = NULL;
-		for(pLoopUnit = pPlayer->firstUnitInSquad(&iLoop, GetSquadNumber()); pLoopUnit != NULL; pLoopUnit = pPlayer->nextUnitInSquad(&iLoop, GetSquadNumber()))
-		{
-			pLoopUnit->UnlinkUnits();
-			pLoopUnit->SetActivityType(ACTIVITY_AWAKE);
-		}
+		FinishSquadMoveIfDone(getOwner(), GetSquadNumber(), this);
+		UnlinkUnits();
+		SetActivityType(ACTIVITY_AWAKE);
 		SetSquadDestination();
-		DLLUI->setDirty(UnitInfo_DIRTY_BIT, true);
+		return;
 	}
-	else if (!IsUnitInActiveMoveMission())
+
+	if (!IsUnitInActiveMoveMission())
 	{
 		if (GetSquadEndMovementType() != WAKE_ON_EACH_UNIT_ARRIVED)
 		{
@@ -15874,7 +15974,97 @@ void CvUnit::TryEndSquadMovement()
 
 		UnlinkUnits();
 	}
-	
+
+	// CIVVACCESS: the last unit to stop ends the squad move in every mode, so the destination is
+	// cleared. VP cleared it only in wake-when-all-arrive, leaving sentry / wake-each squads with a
+	// stale destination that later read as a move in progress.
+	if (bSquadDone)
+	{
+		SetSquadDestination();
+	}
+}
+
+//	--------------------------------------------------------------------------------
+// CIVVACCESS: stop the whole squad's move because this member's move was aborted (a newly
+// revealed enemy or ruin, see UnitPathTo). VP unlinked the aborting unit instead, which stranded
+// any civilian it was escorting (followers have no move order of their own) while the rest of the
+// squad kept going. Here every member still on its squad move stops and wakes for orders, escort
+// links are kept so escorted civilians stay with their escort, and the squad destination is
+// cleared. In wake-when-all-arrive mode the members already holding at the destination wake too,
+// since the move they were waiting on is over. This unit's own mission is left to the caller:
+// it is mid ContinueMission, which pops it.
+void CvUnit::HaltSquadMovement()
+{
+	VALIDATE_OBJECT();
+
+	const int iSquadNumber = GetSquadNumber();
+	if (iSquadNumber == -1)
+		return;
+
+	const bool bWakeAll = GetSquadEndMovementType() == WAKE_ON_ALL_ARRIVED;
+	CvPlayer& kPlayer = GET_PLAYER(getOwner());
+	int iLoop = 0;
+	for (CvUnit* pLoopUnit = kPlayer.firstUnitInSquad(&iLoop, iSquadNumber); pLoopUnit != NULL; pLoopUnit = kPlayer.nextUnitInSquad(&iLoop, iSquadNumber))
+	{
+		if (pLoopUnit == this)
+			continue;
+
+		const bool bMoving = pLoopUnit->IsUnitInActiveSquadMoveMission();
+		if (!bMoving && !bWakeAll)
+			continue;
+
+		if (bMoving)
+			pLoopUnit->ClearMissionQueue();
+
+		// Escort followers stay asleep under their leader, as VP keeps them between turns.
+		if (!pLoopUnit->IsLinked() || pLoopUnit->IsLinkedLeader())
+			pLoopUnit->SetActivityType(ACTIVITY_AWAKE);
+	}
+
+	SetSquadDestination();
+	DLLUI->setDirty(UnitInfo_DIRTY_BIT, true);
+}
+
+//	--------------------------------------------------------------------------------
+// CIVVACCESS: end a squad move that no member is still making. Called when the squad may have just
+// stopped moving for a reason other than a member arriving: a member was removed from the squad
+// (pIgnore NULL, it has already left) or is being killed (pIgnore = the dying unit). In VP only an
+// arrival could end a move, so a squad whose last mover died or left held at its destination
+// forever in wake-when-all-arrive mode. Wakes the members in that mode and clears the destination
+// in every mode; pIgnore is neither counted as moving nor woken. No-op when the squad has no
+// destination or a member is still on its squad move.
+void CvUnit::FinishSquadMoveIfDone(PlayerTypes ePlayer, int iSquadNumber, const CvUnit* pIgnore)
+{
+	if (iSquadNumber == -1 || s_bDispatchingSquadMove)
+		return;
+
+	CvPlayer& kPlayer = GET_PLAYER(ePlayer);
+	int iLoop = 0;
+	CvUnit* pAnchor = NULL;
+	for (CvUnit* pLoopUnit = kPlayer.firstUnitInSquad(&iLoop, iSquadNumber); pLoopUnit != NULL; pLoopUnit = kPlayer.nextUnitInSquad(&iLoop, iSquadNumber))
+	{
+		if (pLoopUnit != pIgnore && pLoopUnit->HasSquadDestination())
+		{
+			pAnchor = pLoopUnit;
+			break;
+		}
+	}
+	if (pAnchor == NULL || pAnchor->IsSquadMovingExcept(pIgnore))
+		return;
+
+	if (pAnchor->GetSquadEndMovementType() == WAKE_ON_ALL_ARRIVED)
+	{
+		for (CvUnit* pLoopUnit = kPlayer.firstUnitInSquad(&iLoop, iSquadNumber); pLoopUnit != NULL; pLoopUnit = kPlayer.nextUnitInSquad(&iLoop, iSquadNumber))
+		{
+			if (pLoopUnit == pIgnore)
+				continue;
+			pLoopUnit->UnlinkUnits();
+			pLoopUnit->SetActivityType(ACTIVITY_AWAKE);
+		}
+		DLLUI->setDirty(UnitInfo_DIRTY_BIT, true);
+	}
+
+	pAnchor->SetSquadDestination();
 }
 
 //  --------------------------------------------------------------------------------
@@ -30830,6 +31020,11 @@ int CvUnit::UnitPathTo(int iX, int iY, int iFlags)
 	//todo: consider movement flags here. especially turn destination, not only path destination
 	bool bMoved = UnitMove(pPathPlot, IsCombatUnit(), NULL, bDone);
 
+	// CIVVACCESS: when this is a squad move (the squad-move flag on a squad member with a squad
+	// destination), an abort below stops the whole squad and keeps escort links (HaltSquadMovement)
+	// instead of unlinking just this unit, which stranded escorted civilians and split the squad.
+	// Every other move keeps VP's unlink-and-stop.
+	const bool bSquadMove = MOD_SQUADS && GetSquadNumber() > -1 && (iFlags & CvUnit::MOVEFLAG_CONTINUE_TO_CLOSEST_PLOT) && HasSquadDestination();
 	if (CountStackingUnitsAtPlot(pPathPlot) < pPathPlot->getUnitLimit())
 	{
 		if (HasSpottedEnemy())
@@ -30839,7 +31034,10 @@ int CvUnit::UnitPathTo(int iX, int iY, int iFlags)
 				ClearPathCache();
 				if (MOD_SQUADS)
 				{
-					UnlinkUnits();
+					if (bSquadMove)
+						HaltSquadMovement();
+					else
+						UnlinkUnits();
 				}
 				return MOVE_RESULT_CANCEL;
 			}
@@ -30852,7 +31050,10 @@ int CvUnit::UnitPathTo(int iX, int iY, int iFlags)
 				ClearPathCache();
 				if (MOD_SQUADS)
 				{
-					UnlinkUnits();
+					if (bSquadMove)
+						HaltSquadMovement();
+					else
+						UnlinkUnits();
 				}
 				return MOVE_RESULT_CANCEL;
 			}
@@ -30863,7 +31064,10 @@ int CvUnit::UnitPathTo(int iX, int iY, int iFlags)
 			ClearPathCache();
 			if (MOD_SQUADS)
 			{
-				UnlinkUnits();
+				if (bSquadMove)
+					HaltSquadMovement();
+				else
+					UnlinkUnits();
 			}
 			return MOVE_RESULT_CANCEL;
 		}
